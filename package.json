@@ -1,0 +1,20 @@
+{
+  "name": "cica-mcp",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "agent-browser": "0.44.0",
+    "cross-spawn": "7.0.6",
+    "express": "5.3.0",
+    "zod": "4.6.7"
+  },
+  "private": true,
+  "description": "Employee-scoped MCP tools for Codex"
+}

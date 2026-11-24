@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+case "${1:-status}" in
+up)
+ systemctl --user start cica-staff-mcp
+ curl -fsS --retry 8 --retry-connrefused http://127.0.0.1:8797/health >/dev/null
+ tunnel up 8797 --name cica-mcp
+ ;;
+down)
+ tunnel down cica-mcp && systemctl --user stop cica-staff-mcp
+ ;;
+status)
+ systemctl --user is-active cica-staff-mcp
+ curl -fsS http://127.0.0.1:8797/health
+ curl -fsS https://cica-mcp.grassinside.com/health
+ ;;
+*) exit 2;;
+esac
