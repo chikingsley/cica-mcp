@@ -19,6 +19,8 @@ node setup.mjs your-work-email
 
 Setup displays a Microsoft device code. Enter it on Microsoft's sign-in page for the setup you just started. Review the requested delegated permissions. If your organization requests administrator consent, contact your Microsoft administrator. A separate local browser then opens the company Netask site for your own login. Keep credentials and enrollment codes inside the sign-in flow.
 
+Each EIP packet uses your verified applicant and an explicit route selected from current form examples or company procedure.
+
 Open a fresh Codex chat. Ask it to run `cica.whoami` and `cica-eip.eip_inspect` with view `status`. Check both returned identities. A first pilot can search for a known contact, locate a work file, save a test email to your own Drafts, and verify it in Outlook. For EIP, start with a real authorized request and review the packet before saving. Saved drafts and final submissions are separate actions.
 
 ## Daily use

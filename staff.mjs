@@ -56,7 +56,17 @@ export function employeeTools(me, token, config) {
         $top: "20",
         $select: "displayName,scoredEmailAddresses,companyName",
       });
-      return (await get("/me/people?" + query)).value;
+      const prefix = name.replaceAll("'", "''");
+      const contacts = new URLSearchParams({
+        $filter: "startswith(displayName,'" + prefix + "')",
+        $select: "displayName,emailAddresses,companyName",
+        $top: "30",
+      });
+      const [suggested, saved] = await Promise.all([
+        get("/me/people?" + query),
+        get("/me/contacts?" + contacts),
+      ]);
+      return { suggested: suggested.value, contacts: saved.value };
     },
   );
   tool(

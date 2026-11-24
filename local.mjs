@@ -87,6 +87,7 @@ export function localTools(cfg) {
         "drafts",
         "workflows",
         "templates",
+        "examples",
         "form",
         "workflow",
       ]),
@@ -94,11 +95,11 @@ export function localTools(cfg) {
     },
     async ({ view, id }) => {
       if (view === "drafts") return cli("workflows", "--folder", "draft");
-      if (view === "form" || view === "workflow") {
+      if (["form", "examples", "workflow"].includes(view)) {
         if (!id) throw Error("Choose a form or workflow ID");
         return cli(
           view,
-          ...(view === "form" ? ["--template"] : []),
+          ...(view === "workflow" ? [] : ["--template"]),
           String(id),
         );
       }
@@ -170,6 +171,10 @@ export function localTools(cfg) {
         .min(1),
     },
     async ({ request, attachments }) => {
+      if (!Array.isArray(request.route) || !request.route.length)
+        throw Error(
+          "Supply the employee-specific route from current form examples or the approved company procedure",
+        );
       const status = await cli("status");
       if (status.identity?.account !== cfg.eip)
         throw Error("Sign in to your Netask account");
