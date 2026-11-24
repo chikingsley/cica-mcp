@@ -154,14 +154,15 @@ export function createApp(
       return res.sendStatus(404);
     res.sendFile(join(root, file));
   });
-  app.get("/info", (req, res) =>
+  app.get("/info", async (req, res) => {
+    await session(res.locals.account);
     res.json({
       email: res.locals.account.email,
       engine: cfg.engine,
       sha256: cfg.engineHash,
       eip: cfg.netask[res.locals.account.email],
-    }),
-  );
+    });
+  });
   const itemPath = (d, i) =>
     "/drives/" + encodeURIComponent(d) + "/items/" + encodeURIComponent(i);
   app.get("/files/:drive/:item", async (req, res) => {
