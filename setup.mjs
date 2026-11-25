@@ -1,111 +1,61 @@
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, realpath, rename, stat } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import spawn from "cross-spawn";
-import { setTimeout as delay } from "node:timers/promises";
-import {
-  base,
-  origin,
-  cfgPath,
-  api,
-  accountDir,
-  browser,
-  browserArgs,
-} from "./local.mjs";
-process.umask(0o077);
-function run(cmd, args) {
-  const child = spawn.sync(cmd, args, { stdio: "inherit" });
-  if (child.status !== 0) throw Error("Setup command failed: " + cmd);
-}
-async function post(path, body) {
-  const r = await fetch(origin + path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (r.status === 202) return null;
-  if (!r.ok)
-    throw Error(
-      "Enrollment returned " + r.status + " " + (await r.text()).slice(0, 200),
-    );
-  return r.json();
-}
-const email = (process.argv[2] || "").toLowerCase().trim();
-if (!email.includes("@"))
-  throw Error("Run node setup.mjs with your work email address.");
-run("uv", ["--version"]);
-run("codex", ["--version"]);
-let cfg = await readFile(cfgPath, "utf8")
-  .then(JSON.parse)
-  .catch(() => null);
-if (
-  cfg?.email !== email ||
-  !(await api(cfg, "/info")
-    .then(() => true)
-    .catch(() => false))
-) {
-  const p = await post("/enroll", { email });
-  console.log(
-    "Open " +
-      p.url +
-      " yourself. Enter " +
-      p.code +
-      " and sign in to your work account. This code expires shortly.",
+import { unzipSync } from "fflate";
+import { accountDir, browser, browserArgs, cfgPath } from "./local.mjs";
+import { mailbox } from "./outlook.mjs";
+const email = (process.argv[2] ?? "").toLowerCase().trim();
+const [, , , eip, archive, syncFolder] = process.argv;
+if (!/^[\w.+-]+@cicahuntek\.us$/.test(email) || !/^u\d+$/.test(eip) || !archive)
+  throw Error(
+    "Provide your company email, Netask user ID, downloaded Netask ZIP and optional synced company folder.",
   );
-  let authorized;
-  const end = Date.now() + p.expires_in * 1000;
-  while (!authorized && Date.now() < end) {
-    await delay((p.interval + 1) * 1000);
-    authorized = await post("/enroll/finish", { key: p.key });
-  }
-  if (!authorized) throw Error("Microsoft sign-in timed out");
-  cfg = { email, token: authorized.token };
-}
-const info = await (await api(cfg, "/info")).json();
+const suffix = email.match(/\.(\d+)@/);
+if (suffix && suffix[1] !== eip.slice(1))
+  throw Error("Verify your email and Netask employee number.");
 const dir = accountDir(email);
+const engine = "netask_eip-0.1.0-py3-none-any.whl";
+const raw = await readFile(archive);
+const data = archive.toLowerCase().endsWith(".zip")
+  ? unzipSync(raw, { filter: (f) => f.name === engine })[engine]
+  : raw;
 if (
-  info.email !== email ||
-  !/^u\d+$/.test(info.eip) ||
-  !/^netask_eip-[\w.-]+\.whl$/.test(info.engine)
+  !data ||
+  createHash("sha256").update(data).digest("hex") !==
+    "6fb3894dbb6606f1114a37f18eb06837186038dd515f5edf81d250b4c9504b2f"
 )
-  throw Error("Invalid staff account mapping");
-await mkdir(dir, { recursive: true, mode: 0o700 });
-const bytes = Buffer.from(
-  await (await api(cfg, "/engine/" + info.engine)).arrayBuffer(),
-);
-if (createHash("sha256").update(bytes).digest("hex") !== info.sha256)
-  throw Error("Netask package verification failed");
-await writeFile(join(dir, info.engine), bytes, { mode: 0o600 });
-cfg = { ...cfg, eip: info.eip, engine: info.engine };
-const tmp = cfgPath + "." + randomUUID();
-await writeFile(tmp, JSON.stringify(cfg), { mode: 0o600 });
-await rename(tmp, cfgPath);
+  throw Error("Download the current package from the portal.");
+const syncRoot = syncFolder ? await realpath(syncFolder) : undefined;
+if (syncRoot && !(await stat(syncRoot)).isDirectory()) throw Error("Choose a synced folder");
+const cfg = { email, eip, engine, syncRoot };
+function run(cmd, args) {
+  const r = spawn.sync(cmd, args, { stdio: "inherit" });
+  if (r.status !== 0) throw Error("Setup command failed: " + cmd);
+}
+run("codex", ["--version"]);
+run("uv", ["--version"]);
 await mkdir(join(dir, "documents"), { recursive: true, mode: 0o700 });
+await writeFile(join(dir, engine), data, { mode: 0o600 });
 run("uv", [
   "run",
   "--no-project",
   "--python",
   "3.14",
   "--with",
-  join(dir, cfg.engine),
+  join(dir, engine),
   "netask-eip",
   "--help",
 ]);
-for (const [name, file] of [
-  ["cica", "bridge.mjs"],
-  ["cica-eip", "local.mjs"],
-]) {
-  run("codex", [
-    "mcp",
-    "add",
-    name,
-    "--",
-    process.execPath,
-    fileURLToPath(new URL("./" + file, import.meta.url)),
-  ]);
-}
+run(process.execPath, [
+  fileURLToPath(new URL("./node_modules/playwright/cli.js", import.meta.url)),
+  "install",
+  "chromium",
+]);
 run(browser, ["install"]);
+console.log("Sign in to Outlook in the browser window that opens.");
+await mailbox(dir, email, async () => console.log("Verified your Outlook mailbox."));
 const { owner, profile } = browserArgs(cfg);
 run(browser, [
   "--session",
@@ -116,7 +66,19 @@ run(browser, [
   "open",
   "https://eip.cicahuntek.us/tw/findex.php",
 ]);
+const tmp = cfgPath + "." + randomUUID();
+await writeFile(tmp, JSON.stringify(cfg), { mode: 0o600 });
+await rename(tmp, cfgPath);
+run("codex", ["mcp", "add", "cica-portal", "--url", "https://cica.grassinside.com/mcp"]);
+run("codex", [
+  "mcp",
+  "add",
+  "cica",
+  "--",
+  process.execPath,
+  fileURLToPath(new URL("./local.mjs", import.meta.url)),
+]);
 console.log(
-  "Finish your own Netask sign-in in the opened browser. Start a fresh Codex chat and ask it to check cica whoami and cica-eip status. Work documents folder: " +
+  "Finish signing in to Netask. In a new Codex chat, ask it to verify EIP status. Your documents folder is " +
     join(dir, "documents"),
 );

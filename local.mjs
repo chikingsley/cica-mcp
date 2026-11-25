@@ -1,19 +1,16 @@
-import { join, basename, resolve } from "node:path";
+import { join, basename, resolve, relative, isAbsolute, sep } from "node:path";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir, readFile, writeFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, writeFile, realpath, copyFile, constants } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { server, tool } from "./common.mjs";
-import {
-  findNativeBinary,
-  nativeTarget,
-} from "./node_modules/agent-browser/scripts/native.js";
+import { findNativeBinary, nativeTarget } from "./node_modules/agent-browser/scripts/native.js";
 const exec = promisify(execFile);
-export const origin = "https://cica-mcp.grassinside.com";
+import { mailbox, compose, once } from "./outlook.mjs";
 export const base = join(homedir(), ".cica-mcp");
 export const browser = findNativeBinary(
   fileURLToPath(new URL("./node_modules/agent-browser/", import.meta.url)),
@@ -26,14 +23,6 @@ export function browserArgs(cfg) {
   const dir = accountDir(cfg.email),
     owner = "cica-" + basename(dir);
   return { profile: join(dir, "browser"), owner };
-}
-export async function api(cfg, path, options = {}) {
-  const r = await fetch(origin + path, {
-    ...options,
-    headers: { ...options.headers, Authorization: "Bearer " + cfg.token },
-  });
-  if (!r.ok) throw Error("CICA service " + r.status);
-  return r;
 }
 export function localTools(cfg) {
   const m = server(),
@@ -97,66 +86,57 @@ export function localTools(cfg) {
       if (view === "drafts") return cli("workflows", "--folder", "draft");
       if (["form", "examples", "workflow"].includes(view)) {
         if (!id) throw Error("Choose a form or workflow ID");
-        return cli(
-          view,
-          ...(view === "workflow" ? [] : ["--template"]),
-          String(id),
-        );
+        return cli(view, ...(view === "workflow" ? [] : ["--template"]), String(id));
       }
       return cli(view);
     },
   );
+  const synced = async (subpath) => {
+    if (!cfg.syncRoot) throw Error("Choose a synced company folder during setup");
+    const root = await realpath(cfg.syncRoot);
+    const path = await realpath(resolve(root, subpath));
+    const rel = relative(root, path);
+    if (isAbsolute(rel) || rel === ".." || rel.startsWith(".." + sep))
+      throw Error("Choose a path within the configured synced folder");
+    return path;
+  };
   tool(
     m,
     "work_file_download",
-    "Download an employee-accessible work document to the private local documents folder for editing, NDA generation or EIP attachment.",
-    {
-      drive: z.string(),
-      item: z.string(),
-      filename: docname,
-      pdf: z.boolean().default(false),
-    },
-    async ({ drive, item, filename, pdf }) => {
-      await mkdir(work, { recursive: true, mode: 0o700 });
-      const r = await api(
-        cfg,
-        "/files/" +
-          encodeURIComponent(drive) +
-          "/" +
-          encodeURIComponent(item) +
-          (pdf ? "?format=pdf" : ""),
-      );
+    "Copy a file from the employee's synced company folder to the private documents folder.",
+    { source: z.string(), filename: docname },
+    async ({ source, filename }) => {
       const path = join(work, filename);
-      await writeFile(path, Buffer.from(await r.arrayBuffer()), {
-        flag: "wx",
-        mode: 0o600,
-      });
+      await copyFile(await synced(source), path, constants.COPYFILE_EXCL);
       return { path };
     },
   );
   tool(
     m,
     "work_file_publish",
-    "Create a new file in an employee-accessible folder using a prepared local document.",
-    { drive: z.string(), folder: z.string(), filename: docname },
-    async ({ drive, folder, filename }) =>
-      (
-        await api(
-          cfg,
-          "/files/" +
-            encodeURIComponent(drive) +
-            "/" +
-            encodeURIComponent(folder),
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/octet-stream",
-              "X-File-Name": encodeURIComponent(filename),
-            },
-            body: await readFile(await document(filename)),
-          },
-        )
-      ).json(),
+    "Copy a new document into a company folder. OneDrive handles upload.",
+    { folder: z.string(), filename: docname },
+    async ({ folder, filename }) => {
+      const path = join(await synced(folder), filename);
+      await copyFile(await document(filename), path, constants.COPYFILE_EXCL);
+      return { localPath: path };
+    },
+  );
+  tool(
+    m,
+    "outlook_draft",
+    "Save and reopen an unsent Outlook Web draft in your own mailbox. Reuse the same request ID on retry.",
+    {
+      request_id: z.uuid(),
+      to: z.array(z.email()).min(1),
+      subject: z.string().trim().min(1).max(240),
+      body: z.string().trim().min(1),
+      attachments: z.array(docname).default([]),
+    },
+    async (args) => {
+      const paths = await Promise.all(args.attachments.map(document));
+      return mailbox(dir, cfg.email, (page) => once(dir, args, () => compose(page, args, paths)));
+    },
   );
   tool(
     m,
@@ -165,9 +145,7 @@ export function localTools(cfg) {
     {
       request: z.record(z.string(), z.unknown()),
       attachments: z
-        .array(
-          z.object({ filename: docname, roles: z.array(z.string()).min(1) }),
-        )
+        .array(z.object({ filename: docname, roles: z.array(z.string()).min(1) }))
         .min(1),
     },
     async ({ request, attachments }) => {
@@ -176,8 +154,7 @@ export function localTools(cfg) {
           "Supply the employee-specific route from current form examples or the approved company procedure",
         );
       const status = await cli("status");
-      if (status.identity?.account !== cfg.eip)
-        throw Error("Sign in to your Netask account");
+      if (status.identity?.account !== cfg.eip) throw Error("Sign in to your Netask account");
       const evidence = await Promise.all(
         attachments.map(async (a) => ({
           path: await document(a.filename),
@@ -232,20 +209,11 @@ export function localTools(cfg) {
         if (!attempt) throw Error("Provide attempt ID");
         return cli(
           step,
-          ...(step === "draft-save-status"
-            ? [path, "--attempt", attempt]
-            : [attempt]),
+          ...(step === "draft-save-status" ? [path, "--attempt", attempt] : [attempt]),
         );
       }
       const args = [step, path];
-      if (
-        [
-          "draft-fill",
-          "draft-attachments",
-          "draft-upload",
-          "draft-save",
-        ].includes(step)
-      ) {
+      if (["draft-fill", "draft-attachments", "draft-upload", "draft-save"].includes(step)) {
         if (!fingerprint) throw Error("Inspect editor first");
         args.push("--expected-state", fingerprint);
       }
@@ -258,10 +226,7 @@ export function localTools(cfg) {
   );
   return m;
 }
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const cfg = JSON.parse(await readFile(cfgPath));
   await localTools(cfg).connect(new StdioServerTransport());
 }
