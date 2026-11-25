@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { server, tool } from "./common.mjs";
 import { findNativeBinary, nativeTarget } from "./node_modules/agent-browser/scripts/native.js";
 const exec = promisify(execFile);
-import { mailbox, compose, once } from "./outlook.mjs";
+import { prepareAttachments, verifyMailbox, compose, once } from "./outlook.mjs";
 export const base = join(homedir(), ".cica-mcp");
 export const browser = findNativeBinary(
   fileURLToPath(new URL("./node_modules/agent-browser/", import.meta.url)),
@@ -24,36 +24,42 @@ export function browserArgs(cfg) {
     owner = "cica-" + basename(dir);
   return { profile: join(dir, "browser"), owner };
 }
+export async function runNetask(cfg, args, headless = true) {
+  const dir = accountDir(cfg.email);
+  const { owner, profile } = browserArgs(cfg);
+
+  const { stdout } = await exec(
+    "uv",
+    [
+      "run",
+      "--no-project",
+      "--python",
+      "3.14",
+      "--with",
+      join(dir, cfg.engine),
+      "netask-eip",
+      "--wrapper",
+      browser,
+      "--owner",
+      owner,
+      "--local-profile",
+      profile,
+      ...(headless && cfg.engine !== "netask_eip-0.1.0-py3-none-any.whl"
+        ? ["--local-headless"]
+        : []),
+      "--account",
+      cfg.eip,
+      ...args,
+    ],
+    { maxBuffer: 12e6, timeout: 120000, windowsHide: true },
+  );
+  return JSON.parse(stdout);
+}
 export function localTools(cfg) {
   const m = server(),
     dir = accountDir(cfg.email),
     work = join(dir, "documents");
-  const { owner, profile } = browserArgs(cfg);
-  const cli = async (...args) => {
-    const { stdout } = await exec(
-      "uv",
-      [
-        "run",
-        "--no-project",
-        "--python",
-        "3.14",
-        "--with",
-        join(dir, cfg.engine),
-        "netask-eip",
-        "--wrapper",
-        browser,
-        "--owner",
-        owner,
-        "--local-profile",
-        profile,
-        "--account",
-        cfg.eip,
-        ...args,
-      ],
-      { maxBuffer: 12e6, timeout: 120000, windowsHide: true },
-    );
-    return JSON.parse(stdout);
-  };
+  const cli = (...args) => runNetask(cfg, args);
   const docname = z
     .string()
     .regex(/^[\p{L}\p{N} (._)-]{1,160}$/u)
@@ -67,9 +73,10 @@ export function localTools(cfg) {
   tool(
     m,
     "eip_inspect",
-    "Verify identity, discover form schemas, reviewers, existing requests or drafts.",
+    "Start a session with open, then verify identity with status. Consult the portal workflow_guide before preparing an NDA or EIP.",
     {
       view: z.enum([
+        "open",
         "status",
         "request-schema",
         "directory",
@@ -125,7 +132,7 @@ export function localTools(cfg) {
   tool(
     m,
     "outlook_draft",
-    "Save and reopen an unsent Outlook Web draft in your own mailbox. Reuse the same request ID on retry.",
+    "Save and read back an unsent Outlook API draft in your own mailbox. Reuse the same request ID on retry.",
     {
       request_id: z.uuid(),
       to: z.array(z.email()).min(1),
@@ -135,7 +142,9 @@ export function localTools(cfg) {
     },
     async (args) => {
       const paths = await Promise.all(args.attachments.map(document));
-      return mailbox(dir, cfg.email, (page) => once(dir, args, () => compose(page, args, paths)));
+      const files = await prepareAttachments(paths);
+      await verifyMailbox(cfg);
+      return once(dir, args, () => compose(cfg, args, files));
     },
   );
   tool(

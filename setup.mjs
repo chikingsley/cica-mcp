@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import spawn from "cross-spawn";
 import { unzipSync } from "fflate";
-import { accountDir, browser, browserArgs, cfgPath } from "./local.mjs";
-import { mailbox } from "./outlook.mjs";
+import { accountDir, browser, browserArgs, cfgPath, runNetask } from "./local.mjs";
+import { powershell, verifyMailbox } from "./outlook.mjs";
 const email = (process.argv[2] ?? "").toLowerCase().trim();
 const [, , , eip, archive, syncFolder] = process.argv;
 if (!/^[\w.+-]+@cicahuntek\.us$/.test(email) || !/^u\d+$/.test(eip) || !archive)
@@ -16,7 +16,7 @@ const suffix = email.match(/\.(\d+)@/);
 if (suffix && suffix[1] !== eip.slice(1))
   throw Error("Verify your email and Netask employee number.");
 const dir = accountDir(email);
-const engine = "netask_eip-0.1.0-py3-none-any.whl";
+const engine = "netask_eip-0.1.1-py3-none-any.whl";
 const raw = await readFile(archive);
 const data = archive.toLowerCase().endsWith(".zip")
   ? unzipSync(raw, { filter: (f) => f.name === engine })[engine]
@@ -24,12 +24,33 @@ const data = archive.toLowerCase().endsWith(".zip")
 if (
   !data ||
   createHash("sha256").update(data).digest("hex") !==
-    "6fb3894dbb6606f1114a37f18eb06837186038dd515f5edf81d250b4c9504b2f"
+    "b83205297c7a209c5cd1c8a58905db704e966bf93e8a3db28acafc78d024ca72"
 )
   throw Error("Download the current package from the portal.");
 const syncRoot = syncFolder ? await realpath(syncFolder) : undefined;
 if (syncRoot && !(await stat(syncRoot)).isDirectory()) throw Error("Choose a synced folder");
-const cfg = { email, eip, engine, syncRoot };
+const cfg = {
+  email,
+  eip,
+  engine,
+  syncRoot,
+  outlookCli: process.env.CICA_OUTLOOK_CLI
+    ? await realpath(process.env.CICA_OUTLOOK_CLI)
+    : undefined,
+};
+if (!cfg.outlookCli && process.platform !== "win32") {
+  const candidate = spawn.sync("which", ["outlook"], { encoding: "utf8" });
+  if (candidate.status === 0) {
+    const path = await realpath(candidate.stdout.trim());
+    if (
+      await verifyMailbox({ ...cfg, outlookCli: path }).then(
+        () => true,
+        () => false,
+      )
+    )
+      cfg.outlookCli = path;
+  }
+}
 function run(cmd, args) {
   const r = spawn.sync(cmd, args, { stdio: "inherit" });
   if (r.status !== 0) throw Error("Setup command failed: " + cmd);
@@ -48,24 +69,6 @@ run("uv", [
   "netask-eip",
   "--help",
 ]);
-run(process.execPath, [
-  fileURLToPath(new URL("./node_modules/playwright/cli.js", import.meta.url)),
-  "install",
-  "chromium",
-]);
-run(browser, ["install"]);
-console.log("Sign in to Outlook in the browser window that opens.");
-await mailbox(dir, email, async () => console.log("Verified your Outlook mailbox."));
-const { owner, profile } = browserArgs(cfg);
-run(browser, [
-  "--session",
-  owner,
-  "--profile",
-  profile,
-  "--headed",
-  "open",
-  "https://eip.cicahuntek.us/tw/findex.php",
-]);
 const tmp = cfgPath + "." + randomUUID();
 await writeFile(tmp, JSON.stringify(cfg), { mode: 0o600 });
 await rename(tmp, cfgPath);
@@ -78,7 +81,68 @@ run("codex", [
   process.execPath,
   fileURLToPath(new URL("./local.mjs", import.meta.url)),
 ]);
+let mailReady = false;
+try {
+  if (!cfg.outlookCli) {
+    // Microsoft manages the delegated session in the employee's local user profile.
+    run(powershell, [
+      "-NoProfile",
+      "-Command",
+      `
+    $ErrorActionPreference = 'Stop'
+    if (!(Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
+      Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Repository PSGallery -Force
+    }
+    $context = Get-MgContext
+    if (!$context -or $context.Account -ne '${email}' -or $context.Scopes -notcontains 'Mail.ReadWrite' -or $context.Scopes -notcontains 'User.Read') {
+      Connect-MgGraph -Scopes User.Read,Mail.ReadWrite -ContextScope CurrentUser -NoWelcome
+    }`,
+    ]);
+  }
+  await verifyMailbox(cfg);
+  mailReady = true;
+} catch (error) {
+  console.error("Outlook setup needs attention:", error.message);
+  process.exitCode = 1;
+}
+run(browser, ["install"]);
+const { owner, profile } = browserArgs(cfg);
+run(browser, [
+  "--session",
+  owner,
+  "--profile",
+  profile,
+  "--headed",
+  "open",
+  "https://eip.cicahuntek.us/tw/findex.php",
+]);
 console.log(
-  "Finish signing in to Netask. In a new Codex chat, ask it to verify EIP status. Your documents folder is " +
+  "Complete your Netask sign-in in the opened window. Setup will verify the applicant and close the sign-in window.",
+);
+let identity;
+const deadline = Date.now() + 600000;
+while (Date.now() < deadline) {
+  const status = await runNetask(cfg, ["status"], false).catch(() => null);
+  if (status?.identity?.account === eip) {
+    identity = status.identity;
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+}
+if (!identity) throw Error("Finish signing in to the configured Netask account and rerun setup.");
+run(browser, ["--session", owner, "close"]);
+try {
+  await runNetask(cfg, ["open"]);
+  const status = await runNetask(cfg, ["status"]);
+  if (status.identity?.account !== eip)
+    throw Error("Netask headless session could not verify the applicant.");
+} finally {
+  run(browser, ["--session", owner, "close"]);
+}
+console.log(
+  (mailReady
+    ? "Mailbox and EIP identity verified."
+    : "EIP identity verified. Complete Microsoft sign-in for mail.") +
+    " Your documents folder is " +
     join(dir, "documents"),
 );
