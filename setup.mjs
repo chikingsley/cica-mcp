@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import spawn from "cross-spawn";
 import { unzipSync } from "fflate";
-import { accountDir, browser, browserArgs, cfgPath, runNetask } from "./local.mjs";
+import { accountDir, browser, browserArgs, cfgPath, runNetask, uv } from "./local.mjs";
 import { powershell, verifyMailbox } from "./outlook.mjs";
 const email = (process.argv[2] ?? "").toLowerCase().trim();
 const [, , , eip, archive, syncFolder] = process.argv;
@@ -56,10 +56,10 @@ function run(cmd, args) {
   if (r.status !== 0) throw Error("Setup command failed: " + cmd);
 }
 run("codex", ["--version"]);
-run("uv", ["--version"]);
+run(uv, ["--version"]);
 await mkdir(join(dir, "documents"), { recursive: true, mode: 0o700 });
 await writeFile(join(dir, engine), data, { mode: 0o600 });
-run("uv", [
+run(uv, [
   "run",
   "--no-project",
   "--python",

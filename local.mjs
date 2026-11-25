@@ -1,4 +1,5 @@
 import { join, basename, resolve, relative, isAbsolute, sep } from "node:path";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -11,6 +12,8 @@ import { server, tool } from "./common.mjs";
 import { findNativeBinary, nativeTarget } from "./node_modules/agent-browser/scripts/native.js";
 const exec = promisify(execFile);
 import { prepareAttachments, verifyMailbox, compose, once } from "./outlook.mjs";
+const perUserUv = join(homedir(), ".local", "bin", process.platform === "win32" ? "uv.exe" : "uv");
+export const uv = existsSync(perUserUv) ? perUserUv : "uv";
 export const base = join(homedir(), ".cica-mcp");
 export const browser = findNativeBinary(
   fileURLToPath(new URL("./node_modules/agent-browser/", import.meta.url)),
@@ -29,7 +32,7 @@ export async function runNetask(cfg, args, headless = true) {
   const { owner, profile } = browserArgs(cfg);
 
   const { stdout } = await exec(
-    "uv",
+    uv,
     [
       "run",
       "--no-project",
